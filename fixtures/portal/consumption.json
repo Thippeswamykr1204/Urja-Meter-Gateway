@@ -1,0 +1,7 @@
+{
+  "readings": [
+    { "timestamp": "2026-10-22T00:00:00Z", "value": "18.20", "unit": "kWh" },
+    { "timestamp": "2026-10-23T00:00:00Z", "value": "22.40", "unit": "kWh" },
+    { "timestamp": "not-a-date", "value": "unknown", "unit": "kWh" }
+  ]
+}

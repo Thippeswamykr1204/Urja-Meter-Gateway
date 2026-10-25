@@ -1,0 +1,24 @@
+{
+  "meters": [
+    {
+      "id": "MTR-1001",
+      "serial_number": "URJA-1001",
+      "name": "North feeder / A-01",
+      "status": "active",
+      "latitude": 12.9716,
+      "longitude": 77.5946,
+      "network_node_id": "substation-north",
+      "last_seen_at": "2026-10-24T09:12:00Z"
+    },
+    {
+      "id": "MTR-1002",
+      "serial_number": "URJA-1002",
+      "name": "North feeder / A-02",
+      "status": "warning",
+      "latitude": 12.975,
+      "longitude": 77.601,
+      "network_node_id": "substation-north",
+      "last_seen_at": "2026-10-24T06:12:00Z"
+    }
+  ]
+}

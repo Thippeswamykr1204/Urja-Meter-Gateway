@@ -1,0 +1,8 @@
+{
+  "nodes": [
+    {"id": "grid", "name": "Distribution grid", "type": "root", "parent_id": null},
+    {"id": "substation-north", "name": "North substation", "type": "substation", "parent_id": "grid"},
+    {"id": "MTR-1001", "name": "North feeder / A-01", "type": "meter", "parent_id": "substation-north", "meter_count": "1"},
+    {"id": "MTR-1002", "name": "North feeder / A-02", "type": "meter", "parent_id": "substation-north", "meter_count": "1"}
+  ]
+}

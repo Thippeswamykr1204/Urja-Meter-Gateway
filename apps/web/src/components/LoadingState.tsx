@@ -1,0 +1,1 @@
+export function LoadingState({ lines = 3 }: { lines?: number }) { return <div className="loading-stack" aria-label="Loading">{Array.from({ length: lines }, (_, index) => <span key={index} className="skeleton-line" style={{ width: `${86 - index * 13}%` }} />)}</div> }

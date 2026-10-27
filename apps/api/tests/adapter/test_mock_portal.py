@@ -26,7 +26,15 @@ async def test_mock_portal_supports_cookie_login_and_hierarchy() -> None:
     await adapter.client.aclose()
     adapter.client = httpx.AsyncClient(base_url=settings.portal_base_url, transport=transport, follow_redirects=True)
     meters = await adapter.list_meters()
+    detail = await adapter.get_meter("MTR-1001")
+    readings = await adapter.get_consumption("MTR-1001")
     hierarchy = await adapter.get_hierarchy()
+    reachable = await adapter.check_reachability()
+    health = await adapter.health()
     await adapter.aclose()
     assert meters[0].id == "MTR-1001"
+    assert detail is not None and detail.id == "MTR-1001"
+    assert readings
     assert hierarchy[0].id == "grid"
+    assert reachable
+    assert health["mode"] == "live"

@@ -14,6 +14,10 @@ class PortalUnavailableError(PortalError):
     """Raised when the portal cannot be reached or is circuit-open."""
 
 
+class PortalCircuitOpenError(PortalUnavailableError):
+    """Raised when the adapter is failing fast while the breaker is open."""
+
+
 class PortalNotFoundError(PortalError):
     """Raised when the portal confirms a resource does not exist."""
 

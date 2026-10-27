@@ -1,4 +1,4 @@
-import type { ApiEnvelope, ConsumptionPoint, HierarchyNode, Meter, Provenance } from './types'
+import type { ApiEnvelope, ConsumptionResponse, HierarchyNode, Meter, ProblemDetails, Signal } from './types'
 
 export type Overview = {
   meter_count: number
@@ -24,14 +24,28 @@ export type SyncStatus = {
   error?: string | null
 }
 
+export class ApiClientError extends Error {
+  status: number
+  requestId: string | null
+  problem: ProblemDetails | null
+
+  constructor(status: number, problem: ProblemDetails | null, requestId: string | null) {
+    super(problem?.detail ?? problem?.title ?? `Request failed (${status})`)
+    this.name = 'ApiClientError'
+    this.status = status
+    this.requestId = requestId
+    this.problem = problem
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
   if (!response.ok) {
-    const problem = await response.json().catch(() => null) as { detail?: string; title?: string }
-    throw new Error(problem?.detail ?? problem?.title ?? `Request failed (${response.status})`)
+    const problem = await response.json().catch(() => null) as ProblemDetails | null
+    throw new ApiClientError(response.status, problem, response.headers.get('X-Request-ID'))
   }
   return response.json() as Promise<T>
 }
@@ -41,11 +55,12 @@ export const api = {
   meters: (query = '', pageSize = 25) => request<ApiEnvelope<Meter[]>>(`/api/v1/meters?page=1&page_size=${pageSize}${query}`),
   meterPage: (page: number, pageSize: number, query = '') => request<ApiEnvelope<Meter[]>>(`/api/v1/meters?page=${page}&page_size=${pageSize}${query}`),
   meter: (id: string) => request<ApiEnvelope<Meter>>(`/api/v1/meters/${encodeURIComponent(id)}`),
-  consumption: (id: string, query = '') => request<ApiEnvelope<{ meter_id: string; points: ConsumptionPoint[]; summary: Record<string, number | null>; provenance: Provenance }>>(`/api/v1/meters/${encodeURIComponent(id)}/consumption${query}`),
+  consumption: (id: string, query = '') => request<ApiEnvelope<ConsumptionResponse>>(`/api/v1/meters/${encodeURIComponent(id)}/consumption${query}`),
   hierarchy: () => request<ApiEnvelope<HierarchyNode[]>>('/api/v1/hierarchy'),
   quality: () => request<ApiEnvelope<QualityReport>>('/api/v1/quality'),
-  signals: () => request<ApiEnvelope<Array<{ meter_id: string; kind: string; timestamp: string | null; detail: string; severity: string }>>>('/api/v1/insights/signals'),
+  signals: () => request<ApiEnvelope<Signal[]>>('/api/v1/insights/signals'),
   sync: () => request<ApiEnvelope<SyncStatus>>('/api/v1/sync/status'),
   refresh: () => request<ApiEnvelope<{ meters_indexed: number }>>('/api/v1/refresh', { method: 'POST' }),
   ready: () => request<{ status: string; portal: Record<string, unknown>; last_sync?: SyncStatus }>('/ready'),
+  metrics: () => request<ApiEnvelope<Record<string, unknown>>>('/api/v1/metrics'),
 }

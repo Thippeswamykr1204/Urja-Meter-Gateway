@@ -19,6 +19,9 @@ async def fault_response(fault: str | None, response: Response) -> None:
         await asyncio.sleep(2)
     if fault == "rate-limit":
         raise HTTPException(status_code=429, detail="mock rate limit")
+    if fault == "503":
+        response.headers["Retry-After"] = "1"
+        raise HTTPException(status_code=503, detail="mock upstream unavailable")
     if fault == "500":
         raise HTTPException(status_code=500, detail="mock upstream failure")
     if fault == "404":
@@ -36,6 +39,8 @@ async def login(response: Response, fault: str | None = Header(default=None, ali
         return malformed_response()
     if fault == "login-200":
         return {"status": "login"}
+    if fault == "login-fail":
+        raise HTTPException(status_code=401, detail="mock login rejected")
     SESSIONS.add("mock-session")
     response.set_cookie("mock_session", "mock-session", httponly=True, samesite="lax")
     return {"status": "dashboard"}

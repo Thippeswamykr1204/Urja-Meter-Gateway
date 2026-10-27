@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import json
 import math
 import sqlite3
-from collections.abc import Iterable, Sequence
+import uuid
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Lock
@@ -17,6 +19,54 @@ from app.domain.models import (
     QualitySummary,
     SyncRun,
 )
+
+
+class MigrationIntegrityError(RuntimeError):
+    """Raised when an applied migration no longer matches its recorded checksum."""
+
+
+EXPECTED_SCHEMA: dict[str, set[str]] = {
+    "schema_migrations": {"version", "applied_at", "checksum"},
+    "meters": {
+        "id", "serial_number", "name", "status", "latitude", "longitude",
+        "network_node_id", "last_seen_at", "source_timestamp", "quality_json",
+        "provenance_json", "indexed_at", "last_seen_in_source", "deleted_at",
+    },
+    "readings": {
+        "meter_id", "timestamp", "original_timestamp", "value", "unit",
+        "original_value", "original_unit", "quality_json", "indexed_at",
+        "reading_kind",
+    },
+    "hierarchy_nodes": {
+        "record_id", "node_id", "name", "node_type", "parent_id", "meter_count",
+        "consumption_total", "quality_json", "indexed_at", "consumption_unit",
+        "consumption_share", "missing_reading_count", "mixed_units",
+    },
+    "sync_runs": {
+        "id", "started_at", "finished_at", "status", "meters_seen",
+        "readings_seen", "hierarchy_nodes_seen", "error", "duration_seconds",
+        "records_rejected", "portal_latency_seconds", "checkpoint", "partial",
+    },
+    "meter_conflicts": {
+        "record_id", "meter_id", "payload_json", "quality_json", "indexed_at",
+    },
+    "dataset_status": {
+        "data_type", "status", "source", "fetched_at", "indexed_at",
+        "portal_timestamp", "stale", "partial", "records_seen",
+        "records_rejected", "error",
+    },
+    "coverage_ranges": {
+        "meter_id", "start_date", "end_date", "status", "fetched_at",
+    },
+    "sync_checkpoints": {"name", "position", "updated_at"},
+    "reading_conflicts": {
+        "conflict_id", "meter_id", "timestamp", "previous_json", "incoming_json",
+        "indexed_at",
+    },
+    "sync_snapshot_records": {
+        "run_id", "data_type", "record_key", "payload_json",
+    },
+}
 
 
 class SQLiteStore:
@@ -54,18 +104,127 @@ class SQLiteStore:
     def _migrate(self) -> None:
         with self._lock:
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL, checksum TEXT)"
             )
-            applied = {row[0] for row in self._connection.execute("SELECT version FROM schema_migrations")}
-            for path in sorted(self._migrations_path.glob("*.sql")):
-                if path.name in applied:
-                    continue
-                self._connection.executescript(path.read_text())
-                self._connection.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (path.name, datetime.now(UTC).isoformat()),
-                )
+            columns = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
+            }
+            if "checksum" not in columns:
+                self._connection.execute("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT")
             self._connection.commit()
+
+            paths = sorted(self._migrations_path.glob("*.sql"))
+            checksums = {path.name: self._migration_checksum(path) for path in paths}
+            applied_rows = {
+                row["version"]: row["checksum"]
+                for row in self._connection.execute("SELECT version, checksum FROM schema_migrations")
+            }
+
+            for version, checksum in applied_rows.items():
+                if checksum is None:
+                    raise MigrationIntegrityError(
+                        f"Migration checksum is missing for applied migration {version}. "
+                        "Delete the local database or add a new migration; "
+                        "an existing migration cannot be verified safely."
+                    )
+
+            applied = {
+                row["version"]: row["checksum"]
+                for row in self._connection.execute("SELECT version, checksum FROM schema_migrations")
+            }
+            unknown_migrations = sorted(set(applied) - set(checksums))
+            if unknown_migrations:
+                raise MigrationIntegrityError(
+                    "Applied migrations are missing from the configured migrations directory: "
+                    + ", ".join(unknown_migrations)
+                )
+            for path in sorted(self._migrations_path.glob("*.sql")):
+                checksum = checksums[path.name]
+                if path.name in applied:
+                    if applied[path.name] != checksum:
+                        raise MigrationIntegrityError(
+                            f"Migration checksum mismatch for {path.name}: the applied migration does not "
+                            f"match the current file. Delete the local database or add a new migration; "
+                            f"do not edit an applied migration. Expected {applied[path.name]}, found {checksum}."
+                        )
+                    continue
+                self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement in self._migration_statements(path.read_text(encoding="utf-8")):
+                        self._connection.execute(statement)
+                    self._connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at, checksum) VALUES (?, ?, ?)",
+                        (path.name, datetime.now(UTC).isoformat(), checksum),
+                    )
+                    self._connection.commit()
+                except Exception:
+                    self._connection.rollback()
+                    raise
+
+            self._verify_schema()
+
+    @staticmethod
+    def _migration_checksum(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _migration_statements(sql: str) -> list[str]:
+        statements: list[str] = []
+        buffer: list[str] = []
+        for line in sql.splitlines(keepends=True):
+            buffer.append(line)
+            candidate = "".join(buffer)
+            if sqlite3.complete_statement(candidate):
+                statement = candidate.strip()
+                if statement and any(
+                    line.strip() and not line.lstrip().startswith("--") for line in statement.splitlines()
+                ):
+                    statements.append(statement)
+                buffer = []
+        remainder = "".join(buffer).strip()
+        if remainder:
+            if not sqlite3.complete_statement(f"{remainder};"):
+                raise sqlite3.OperationalError("Migration ended with an incomplete SQL statement")
+            statements.append(remainder)
+        return statements
+
+    def _verify_schema(self) -> None:
+        missing_tables: list[str] = []
+        missing_columns: list[str] = []
+
+        for table, expected_columns in EXPECTED_SCHEMA.items():
+            table_exists = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if table_exists is None:
+                missing_tables.append(table)
+                continue
+
+            columns = {
+                row[1]
+                for row in self._connection.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            }
+            for column in sorted(expected_columns - columns):
+                missing_columns.append(f"{table}.{column}")
+
+        if missing_tables or missing_columns:
+            details: list[str] = []
+            if missing_tables:
+                details.append(
+                    f"missing tables: {', '.join(sorted(missing_tables))}"
+                )
+            if missing_columns:
+                details.append(
+                    f"missing columns: {', '.join(missing_columns)}"
+                )
+            raise MigrationIntegrityError(
+                "SQLite schema verification failed ("
+                + "; ".join(details)
+                + "). Delete the local database or add a new migration."
+            )
 
     def _execute(self, sql: str, parameters: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -78,18 +237,7 @@ class SQLiteStore:
             self._connection.executemany(sql, parameters)
             self._connection.commit()
 
-    @staticmethod
-    def _quality_json(quality: QualitySummary) -> str:
-        return quality.model_dump_json()
-
-    @staticmethod
-    def _provenance_json(provenance: Provenance) -> str:
-        return provenance.model_dump_json()
-
-    async def upsert_meters(self, meters: Sequence[Meter], seen_at: datetime | None = None) -> None:
-        await asyncio.to_thread(self._upsert_meters, list(meters), seen_at or datetime.now(UTC))
-
-    def _upsert_meters(self, meters: list[Meter], seen_at: datetime) -> None:
+    def _upsert_meters_in_transaction(self, meters: list[Meter], seen_at: datetime) -> None:
         now = seen_at.isoformat()
         unique_meters: list[Meter] = []
         conflicts: list[tuple[str, str, str, str, str]] = []
@@ -105,7 +253,7 @@ class SQLiteStore:
                         meter.quality.model_dump_json(), now,
                     )
                 )
-        self._executemany(
+        self._connection.executemany(
             """
             INSERT INTO meters (
               id, serial_number, name, status, latitude, longitude, network_node_id,
@@ -140,10 +288,26 @@ class SQLiteStore:
             ],
         )
         if conflicts:
-            self._executemany(
+            self._connection.executemany(
                 "INSERT OR REPLACE INTO meter_conflicts(record_id, meter_id, payload_json, quality_json, indexed_at) VALUES (?, ?, ?, ?, ?)",
                 conflicts,
             )
+
+    @staticmethod
+    def _quality_json(quality: QualitySummary) -> str:
+        return quality.model_dump_json()
+
+    @staticmethod
+    def _provenance_json(provenance: Provenance) -> str:
+        return provenance.model_dump_json()
+
+    async def upsert_meters(self, meters: Sequence[Meter], seen_at: datetime | None = None) -> None:
+        await asyncio.to_thread(self._upsert_meters, list(meters), seen_at or datetime.now(UTC))
+
+    def _upsert_meters(self, meters: list[Meter], seen_at: datetime) -> None:
+        with self._lock:
+            self._upsert_meters_in_transaction(meters, seen_at)
+            self._connection.commit()
 
     async def tombstone_missing_meters(self, ids: Sequence[str], seen_at: datetime | None = None) -> None:
         await asyncio.to_thread(self._tombstone_missing_meters, list(ids), seen_at or datetime.now(UTC))
@@ -259,32 +423,72 @@ class SQLiteStore:
         await asyncio.to_thread(self._upsert_readings, meter_id, list(points))
 
     def _upsert_readings(self, meter_id: str, points: list[ConsumptionPoint]) -> None:
-        self._executemany(
-            """
-            INSERT INTO readings (meter_id, timestamp, original_timestamp, value, unit, original_value,
-              original_unit, quality_json, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(meter_id, timestamp) DO UPDATE SET original_timestamp=excluded.original_timestamp,
-              value=excluded.value, unit=excluded.unit, original_value=excluded.original_value,
-              original_unit=excluded.original_unit, quality_json=excluded.quality_json,
-              indexed_at=excluded.indexed_at
-            """,
-            [
+        with self._lock:
+            self._upsert_readings_in_transaction(meter_id, points)
+            self._connection.commit()
+
+    def _upsert_readings_in_transaction(self, meter_id: str, points: list[ConsumptionPoint]) -> None:
+        indexed_at = datetime.now(UTC).isoformat()
+        for point in points:
+            if point.timestamp is None:
+                continue
+            timestamp = point.timestamp.isoformat()
+            existing = self._connection.execute(
+                "SELECT * FROM readings WHERE meter_id=? AND timestamp=?", (meter_id, timestamp)
+            ).fetchone()
+            incoming = point
+            if existing is not None:
+                previous = {
+                    "timestamp": existing["timestamp"],
+                    "original_timestamp": existing["original_timestamp"],
+                    "value": existing["value"],
+                    "unit": existing["unit"],
+                    "original_value": existing["original_value"],
+                    "original_unit": existing["original_unit"],
+                }
+                current = {
+                    "timestamp": timestamp,
+                    "original_timestamp": point.original_timestamp,
+                    "value": point.value,
+                    "unit": point.unit,
+                    "original_value": point.original_value,
+                    "original_unit": point.original_unit,
+                }
+                if previous != current:
+                    quality = QualitySummary(
+                        flags=list(dict.fromkeys([*point.quality.flags, QualityFlag.CONFLICT])),
+                        issue_count=point.quality.issue_count + 1,
+                        notes=[*point.quality.notes, "latest value retained; previous value stored in reading_conflicts"],
+                    )
+                    incoming = point.model_copy(update={"quality": quality})
+                    self._connection.execute(
+                        "INSERT INTO reading_conflicts(conflict_id, meter_id, timestamp, previous_json, incoming_json, indexed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (uuid.uuid4().hex, meter_id, timestamp, json.dumps(previous), incoming.model_dump_json(), indexed_at),
+                    )
+            self._connection.execute(
+                """
+                INSERT INTO readings (meter_id, timestamp, original_timestamp, value, unit, original_value,
+                  original_unit, reading_kind, quality_json, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(meter_id, timestamp) DO UPDATE SET original_timestamp=excluded.original_timestamp,
+                  value=excluded.value, unit=excluded.unit, original_value=excluded.original_value,
+                  original_unit=excluded.original_unit, reading_kind=excluded.reading_kind,
+                  quality_json=excluded.quality_json,
+                  indexed_at=excluded.indexed_at
+                """,
                 (
                     meter_id,
-                    point.timestamp.isoformat() if point.timestamp else None,
-                    point.original_timestamp,
-                    point.value,
-                    point.unit,
-                    point.original_value,
-                    point.original_unit,
-                    point.quality.model_dump_json(),
-                    datetime.now(UTC).isoformat(),
-                )
-                for point in points
-                if point.timestamp is not None
-            ],
-        )
+                    timestamp,
+                    incoming.original_timestamp,
+                    incoming.value,
+                    incoming.unit,
+                    incoming.original_value,
+                    incoming.original_unit,
+                    incoming.reading_kind,
+                    incoming.quality.model_dump_json(),
+                    indexed_at,
+                ),
+            )
 
     async def list_readings(self, meter_id: str, start: date | None = None, end: date | None = None) -> list[ConsumptionPoint]:
         return await asyncio.to_thread(self._list_readings, meter_id, start, end)
@@ -310,6 +514,7 @@ class SQLiteStore:
                 unit=row["unit"],
                 original_value=row["original_value"],
                 original_unit=row["original_unit"],
+                reading_kind=row["reading_kind"],
                 quality=json.loads(row["quality_json"]),
             )
             for row in rows
@@ -319,23 +524,26 @@ class SQLiteStore:
         await asyncio.to_thread(self._replace_hierarchy, list(roots))
 
     def _replace_hierarchy(self, roots: list[HierarchyNode]) -> None:
+        with self._lock:
+            self._replace_hierarchy_in_transaction(roots)
+            self._connection.commit()
+
+    def _replace_hierarchy_in_transaction(self, roots: list[HierarchyNode]) -> None:
         rows: list[tuple[Any, ...]] = []
 
         def visit(node: HierarchyNode, path: str) -> None:
             record_id = node.record_id or f"{path}/{node.id}"
-            rows.append((record_id, node.id, node.name, node.node_type, node.parent_id, node.meter_count, node.consumption_total, node.quality.model_dump_json()))
+            rows.append((record_id, node.id, node.name, node.node_type, node.parent_id, node.meter_count, node.consumption_total, node.consumption_unit, node.consumption_share, node.missing_reading_count, int(node.mixed_units), node.quality.model_dump_json()))
             for index, child in enumerate(node.children):
                 visit(child, f"{record_id}:{index}")
 
         for index, root in enumerate(roots):
             visit(root, f"root:{index}")
-        with self._lock:
-            self._connection.execute("DELETE FROM hierarchy_nodes")
-            self._connection.executemany(
-                "INSERT INTO hierarchy_nodes(record_id, node_id, name, node_type, parent_id, meter_count, consumption_total, quality_json, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [(*row, datetime.now(UTC).isoformat()) for row in rows],
-            )
-            self._connection.commit()
+        self._connection.execute("DELETE FROM hierarchy_nodes")
+        self._connection.executemany(
+            "INSERT INTO hierarchy_nodes(record_id, node_id, name, node_type, parent_id, meter_count, consumption_total, consumption_unit, consumption_share, missing_reading_count, mixed_units, quality_json, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(*row, datetime.now(UTC).isoformat()) for row in rows],
+        )
 
     async def list_hierarchy(self) -> list[HierarchyNode]:
         return await asyncio.to_thread(self._list_hierarchy)
@@ -343,13 +551,15 @@ class SQLiteStore:
     def _list_hierarchy(self) -> list[HierarchyNode]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT record_id, node_id, name, node_type, parent_id, meter_count, consumption_total, quality_json FROM hierarchy_nodes ORDER BY record_id"
+                "SELECT record_id, node_id, name, node_type, parent_id, meter_count, consumption_total, consumption_unit, consumption_share, missing_reading_count, mixed_units, quality_json FROM hierarchy_nodes ORDER BY record_id"
             ).fetchall()
         nodes = [
             HierarchyNode(
                 record_id=row["record_id"], id=row["node_id"], name=row["name"], node_type=row["node_type"],
                 parent_id=row["parent_id"], meter_count=row["meter_count"],
                 consumption_total=row["consumption_total"], quality=json.loads(row["quality_json"]),
+                consumption_unit=row["consumption_unit"], consumption_share=row["consumption_share"],
+                missing_reading_count=row["missing_reading_count"], mixed_units=bool(row["mixed_units"]),
             )
             for row in rows
         ]
@@ -435,11 +645,248 @@ class SQLiteStore:
                     timestamp=self._parse_datetime(row["timestamp"]),
                     original_timestamp=row["original_timestamp"], value=row["value"], unit=row["unit"],
                     original_value=row["original_value"], original_unit=row["original_unit"],
+                    reading_kind=row["reading_kind"],
                     quality=json.loads(row["quality_json"]),
                 ),
             )
             for row in rows
         ]
+
+    async def commit_snapshot(
+        self,
+        run_id: int,
+        meters: Sequence[Meter],
+        readings: Mapping[str, Sequence[ConsumptionPoint]],
+        roots: Sequence[HierarchyNode],
+        source: str,
+        fetched_at: datetime,
+        partial: bool = False,
+        records_rejected: int = 0,
+    ) -> None:
+        await asyncio.to_thread(
+            self._commit_snapshot,
+            run_id,
+            list(meters),
+            {meter_id: list(points) for meter_id, points in readings.items()},
+            list(roots),
+            source,
+            fetched_at,
+            partial,
+            records_rejected,
+        )
+
+    def _commit_snapshot(
+        self,
+        run_id: int,
+        meters: list[Meter],
+        readings: Mapping[str, Sequence[ConsumptionPoint]],
+        roots: list[HierarchyNode],
+        source: str,
+        fetched_at: datetime,
+        partial: bool,
+        records_rejected: int,
+    ) -> None:
+        indexed_at = datetime.now(UTC)
+        fetched_text = fetched_at.isoformat()
+        indexed_text = indexed_at.isoformat()
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN")
+                self._connection.execute("DELETE FROM sync_snapshot_records WHERE run_id=?", (run_id,))
+                self._connection.executemany(
+                    "INSERT INTO sync_snapshot_records(run_id, data_type, record_key, payload_json) VALUES (?, ?, ?, ?)",
+                    [
+                        (run_id, "meters", meter.id, meter.model_dump_json()) for meter in meters
+                    ]
+                    + [
+                        (run_id, "readings", f"{meter_id}:{point.timestamp.isoformat()}", point.model_dump_json())
+                        for meter_id, points in readings.items()
+                        for point in points
+                        if point.timestamp is not None
+                    ]
+                    + [
+                        (run_id, "hierarchy", root.record_id or root.id, root.model_dump_json())
+                        for root in roots
+                    ],
+                )
+                self._upsert_meters_in_transaction(meters, indexed_at)
+                self._tombstone_missing_meters_in_transaction([meter.id for meter in meters], indexed_at)
+                for meter_id, points in readings.items():
+                    point_list = list(points)
+                    self._upsert_readings_in_transaction(meter_id, point_list)
+                    dated = [point.timestamp.date() for point in point_list if point.timestamp is not None]
+                    if dated:
+                        self._connection.execute(
+                            "INSERT OR REPLACE INTO coverage_ranges(meter_id, start_date, end_date, status, fetched_at) VALUES (?, ?, ?, 'complete', ?)",
+                            (meter_id, min(dated).isoformat(), max(dated).isoformat(), fetched_text),
+                        )
+                self._replace_hierarchy_in_transaction(roots)
+                for data_type, count in (
+                    ("meters", len(meters)),
+                    ("consumption", sum(len(points) for points in readings.values())),
+                    ("hierarchy", self._count_hierarchy_rows(roots)),
+                ):
+                    status = "empty" if count == 0 else ("partial" if partial else "available")
+                    self._connection.execute(
+                        """
+                        INSERT INTO dataset_status(data_type, status, source, fetched_at, indexed_at, stale, partial, records_seen, records_rejected, error)
+                        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, NULL)
+                        ON CONFLICT(data_type) DO UPDATE SET status=excluded.status, source=excluded.source,
+                          fetched_at=excluded.fetched_at, indexed_at=excluded.indexed_at, stale=0,
+                          partial=excluded.partial, records_seen=excluded.records_seen,
+                          records_rejected=excluded.records_rejected, error=NULL
+                        """,
+                        (data_type, status, source, fetched_text, indexed_text, int(partial), count, records_rejected),
+                    )
+                self._connection.execute(
+                    "INSERT INTO sync_checkpoints(name, position, updated_at) VALUES ('full', ?, ?) ON CONFLICT(name) DO UPDATE SET position=excluded.position, updated_at=excluded.updated_at",
+                    (indexed_text, indexed_text),
+                )
+                self._connection.execute("DELETE FROM sync_snapshot_records WHERE run_id=?", (run_id,))
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _tombstone_missing_meters_in_transaction(self, ids: list[str], seen_at: datetime) -> None:
+        if not ids:
+            self._connection.execute(
+                "UPDATE meters SET deleted_at=? WHERE deleted_at IS NULL",
+                (seen_at.isoformat(),),
+            )
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self._connection.execute(
+            f"UPDATE meters SET deleted_at=? WHERE deleted_at IS NULL AND id NOT IN ({placeholders})",
+            [seen_at.isoformat(), *ids],
+        )
+
+    @staticmethod
+    def _count_hierarchy_rows(roots: Sequence[HierarchyNode]) -> int:
+        return sum(1 + SQLiteStore._count_hierarchy_rows(node.children) for node in roots)
+
+    async def mark_datasets_stale(self, error: str) -> None:
+        await asyncio.to_thread(self._mark_datasets_stale, error)
+
+    def _mark_datasets_stale(self, error: str) -> None:
+        with self._lock:
+            self._connection.execute(
+                "UPDATE dataset_status SET stale=1, error=?, status=CASE WHEN status='empty' THEN 'empty' ELSE 'stale' END",
+                (error[:500],),
+            )
+            self._connection.commit()
+
+    async def dataset_status(self, data_type: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._dataset_status, data_type)
+
+    def _dataset_status(self, data_type: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM dataset_status WHERE data_type=?", (data_type,)).fetchone()
+        return dict(row) if row else None
+
+    async def record_dataset_status(
+        self,
+        data_type: str,
+        source: str,
+        status: str,
+        fetched_at: datetime,
+        records_seen: int,
+        partial: bool = False,
+        records_rejected: int = 0,
+    ) -> None:
+        await asyncio.to_thread(
+            self._record_dataset_status,
+            data_type,
+            source,
+            status,
+            fetched_at,
+            records_seen,
+            partial,
+            records_rejected,
+        )
+
+    def _record_dataset_status(
+        self,
+        data_type: str,
+        source: str,
+        status: str,
+        fetched_at: datetime,
+        records_seen: int,
+        partial: bool,
+        records_rejected: int,
+    ) -> None:
+        indexed_at = datetime.now(UTC)
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO dataset_status(data_type, status, source, fetched_at, indexed_at, stale, partial, records_seen, records_rejected, error)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, NULL)
+                ON CONFLICT(data_type) DO UPDATE SET status=excluded.status, source=excluded.source,
+                  fetched_at=excluded.fetched_at, indexed_at=excluded.indexed_at, stale=0,
+                  partial=excluded.partial, records_seen=excluded.records_seen,
+                  records_rejected=excluded.records_rejected, error=NULL
+                """,
+                (data_type, status, source, fetched_at.isoformat(), indexed_at.isoformat(), int(partial), records_seen, records_rejected),
+            )
+            self._connection.commit()
+
+    async def missing_ranges(self, meter_id: str, start: date, end: date) -> list[tuple[date, date]]:
+        return await asyncio.to_thread(self._missing_ranges, meter_id, start, end)
+
+    def _missing_ranges(self, meter_id: str, start: date, end: date) -> list[tuple[date, date]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT start_date, end_date FROM coverage_ranges WHERE meter_id=? AND status='complete' AND end_date >= ? AND start_date <= ? ORDER BY start_date",
+                (meter_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        cursor = start
+        missing: list[tuple[date, date]] = []
+        for row in rows:
+            covered_start = max(cursor, date.fromisoformat(row["start_date"]))
+            covered_end = min(end, date.fromisoformat(row["end_date"]))
+            if covered_start > cursor:
+                missing.append((cursor, covered_start.fromordinal(covered_start.toordinal() - 1)))
+            if covered_end >= cursor:
+                cursor = covered_end.fromordinal(covered_end.toordinal() + 1)
+            if cursor > end:
+                break
+        if cursor <= end:
+            missing.append((cursor, end))
+        return missing
+
+    async def mark_coverage(self, meter_id: str, start: date, end: date, status: str, fetched_at: datetime | None = None) -> None:
+        await asyncio.to_thread(self._mark_coverage, meter_id, start, end, status, fetched_at or datetime.now(UTC))
+
+    def _mark_coverage(self, meter_id: str, start: date, end: date, status: str, fetched_at: datetime) -> None:
+        with self._lock:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO coverage_ranges(meter_id, start_date, end_date, status, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                (meter_id, start.isoformat(), end.isoformat(), status, fetched_at.isoformat()),
+            )
+            self._connection.commit()
+
+    async def set_checkpoint(self, name: str, position: str | None) -> None:
+        await asyncio.to_thread(self._set_checkpoint, name, position)
+
+    def _set_checkpoint(self, name: str, position: str | None) -> None:
+        with self._lock:
+            now = datetime.now(UTC).isoformat()
+            self._connection.execute(
+                "INSERT INTO sync_checkpoints(name, position, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET position=excluded.position, updated_at=excluded.updated_at",
+                (name, position, now),
+            )
+            self._connection.commit()
+
+    async def backup(self, destination: str) -> None:
+        await asyncio.to_thread(self._backup, destination)
+
+    def _backup(self, destination: str) -> None:
+        target = sqlite3.connect(destination)
+        try:
+            with self._lock:
+                self._connection.backup(target)
+        finally:
+            target.close()
 
     async def begin_sync(self) -> int:
         return await asyncio.to_thread(self._begin_sync)
@@ -453,14 +900,56 @@ class SQLiteStore:
             raise RuntimeError("SQLite did not return a sync run id")
         return int(cursor.lastrowid)
 
-    async def finish_sync(self, run_id: int, status: str, meters: int = 0, readings: int = 0, hierarchy_nodes: int = 0, error: str | None = None) -> None:
-        await asyncio.to_thread(self._finish_sync, run_id, status, meters, readings, hierarchy_nodes, error)
-
-    def _finish_sync(self, run_id: int, status: str, meters: int, readings: int, hierarchy_nodes: int, error: str | None) -> None:
-        self._execute(
-            "UPDATE sync_runs SET finished_at=?, status=?, meters_seen=?, readings_seen=?, hierarchy_nodes_seen=?, error=? WHERE id=?",
-            (datetime.now(UTC).isoformat(), status, meters, readings, hierarchy_nodes, error, run_id),
+    async def finish_sync(
+        self,
+        run_id: int,
+        status: str,
+        meters: int = 0,
+        readings: int = 0,
+        hierarchy_nodes: int = 0,
+        error: str | None = None,
+        records_rejected: int = 0,
+        portal_latency_seconds: float | None = None,
+        checkpoint: str | None = None,
+        partial: bool = False,
+    ) -> None:
+        await asyncio.to_thread(
+            self._finish_sync,
+            run_id,
+            status,
+            meters,
+            readings,
+            hierarchy_nodes,
+            error,
+            records_rejected,
+            portal_latency_seconds,
+            checkpoint,
+            partial,
         )
+
+    def _finish_sync(
+        self,
+        run_id: int,
+        status: str,
+        meters: int,
+        readings: int,
+        hierarchy_nodes: int,
+        error: str | None,
+        records_rejected: int,
+        portal_latency_seconds: float | None,
+        checkpoint: str | None,
+        partial: bool,
+    ) -> None:
+        finished_at = datetime.now(UTC)
+        with self._lock:
+            row = self._connection.execute("SELECT started_at FROM sync_runs WHERE id=?", (run_id,)).fetchone()
+            started_at = datetime.fromisoformat(row[0]) if row else finished_at
+            duration = max(0.0, (finished_at - started_at).total_seconds())
+            self._connection.execute(
+                "UPDATE sync_runs SET finished_at=?, status=?, meters_seen=?, readings_seen=?, hierarchy_nodes_seen=?, error=?, duration_seconds=?, records_rejected=?, portal_latency_seconds=?, checkpoint=?, partial=? WHERE id=?",
+                (finished_at.isoformat(), status, meters, readings, hierarchy_nodes, error, duration, records_rejected, portal_latency_seconds, checkpoint, int(partial), run_id),
+            )
+            self._connection.commit()
 
     async def latest_sync(self) -> SyncRun | None:
         return await asyncio.to_thread(self._latest_sync)
@@ -473,6 +962,8 @@ class SQLiteStore:
         return SyncRun(
             id=row["id"], started_at=datetime.fromisoformat(row["started_at"]), finished_at=datetime.fromisoformat(row["finished_at"]) if row["finished_at"] else None,
             status=row["status"], meters_seen=row["meters_seen"], readings_seen=row["readings_seen"], hierarchy_nodes_seen=row["hierarchy_nodes_seen"], error=row["error"],
+            duration_seconds=row["duration_seconds"], records_rejected=row["records_rejected"],
+            portal_latency_seconds=row["portal_latency_seconds"], checkpoint=row["checkpoint"], partial=bool(row["partial"]),
         )
 
     async def ping(self) -> bool:

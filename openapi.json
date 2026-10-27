@@ -129,7 +129,8 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 200
                 },
                 {
                   "type": "null"
@@ -145,7 +146,8 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 50
                 },
                 {
                   "type": "null"
@@ -344,6 +346,7 @@
             "schema": {
               "type": "string",
               "minLength": 1,
+              "maxLength": 200,
               "title": "Q"
             }
           },
@@ -411,6 +414,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "maxLength": 128,
               "title": "Meter Id"
             }
           }
@@ -455,6 +459,7 @@
             "required": true,
             "schema": {
               "type": "string",
+              "maxLength": 128,
               "title": "Meter Id"
             }
           },
@@ -608,6 +613,29 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiEnvelope_Union_SyncRun__dict_str__str___"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "summary": "Metrics",
+        "operationId": "metrics_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_dict_str__object__"
                 }
               }
             }
@@ -933,6 +961,11 @@
             ],
             "title": "Original Unit"
           },
+          "reading_kind": {
+            "type": "string",
+            "title": "Reading Kind",
+            "default": "unknown"
+          },
           "quality": {
             "$ref": "#/components/schemas/QualitySummary"
           }
@@ -1043,6 +1076,36 @@
               }
             ],
             "title": "Unit"
+          },
+          "mixed_units": {
+            "type": "boolean",
+            "title": "Mixed Units",
+            "default": false
+          },
+          "invalid_count": {
+            "type": "integer",
+            "title": "Invalid Count",
+            "default": 0
+          },
+          "unknown_unit_count": {
+            "type": "integer",
+            "title": "Unknown Unit Count",
+            "default": 0
+          },
+          "counter_reset_count": {
+            "type": "integer",
+            "title": "Counter Reset Count",
+            "default": 0
+          },
+          "reading_kind": {
+            "type": "string",
+            "title": "Reading Kind",
+            "default": "unknown"
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete",
+            "default": true
           }
         },
         "type": "object",
@@ -1169,6 +1232,38 @@
               }
             ],
             "title": "Consumption Total"
+          },
+          "consumption_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumption Unit"
+          },
+          "consumption_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumption Share"
+          },
+          "missing_reading_count": {
+            "type": "integer",
+            "title": "Missing Reading Count",
+            "default": 0
+          },
+          "mixed_units": {
+            "type": "boolean",
+            "title": "Mixed Units",
+            "default": false
           },
           "quality": {
             "$ref": "#/components/schemas/QualitySummary"
@@ -1336,6 +1431,28 @@
               }
             ],
             "title": "Age Seconds"
+          },
+          "indexed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Indexed At"
+          },
+          "data_status": {
+            "type": "string",
+            "title": "Data Status",
+            "default": "available"
+          },
+          "partial": {
+            "type": "boolean",
+            "title": "Partial",
+            "default": false
           }
         },
         "type": "object",
@@ -1358,7 +1475,12 @@
           "unknown_unit",
           "schema_drift",
           "ambiguous_number",
-          "ambiguous_date_format"
+          "ambiguous_date_format",
+          "mixed_unit",
+          "conflict",
+          "counter_reset",
+          "partial",
+          "incompatible_reading"
         ],
         "title": "QualityFlag"
       },
@@ -1417,6 +1539,44 @@
             "type": "string",
             "title": "Severity",
             "default": "info"
+          },
+          "observed_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Value"
+          },
+          "baseline": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline"
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule"
+          },
+          "sufficient_history": {
+            "type": "boolean",
+            "title": "Sufficient History",
+            "default": true
           }
         },
         "type": "object",
@@ -1479,6 +1639,49 @@
               }
             ],
             "title": "Error"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "records_rejected": {
+            "type": "integer",
+            "title": "Records Rejected",
+            "default": 0
+          },
+          "portal_latency_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portal Latency Seconds"
+          },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint"
+          },
+          "partial": {
+            "type": "boolean",
+            "title": "Partial",
+            "default": false
           }
         },
         "type": "object",

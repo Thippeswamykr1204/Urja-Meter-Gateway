@@ -21,6 +21,11 @@ class QualityFlag(StrEnum):
     SCHEMA_DRIFT = "schema_drift"
     AMBIGUOUS_NUMBER = "ambiguous_number"
     AMBIGUOUS_DATE_FORMAT = "ambiguous_date_format"
+    MIXED_UNIT = "mixed_unit"
+    CONFLICT = "conflict"
+    COUNTER_RESET = "counter_reset"
+    PARTIAL = "partial"
+    INCOMPATIBLE_READING = "incompatible_reading"
 
 
 class Provenance(BaseModel):
@@ -29,6 +34,9 @@ class Provenance(BaseModel):
     stale: bool = False
     portal_timestamp: datetime | None = None
     age_seconds: float | None = None
+    indexed_at: datetime | None = None
+    data_status: str = "available"
+    partial: bool = False
 
 
 class QualitySummary(BaseModel):
@@ -60,6 +68,7 @@ class ConsumptionPoint(BaseModel):
     unit: str | None = None
     original_value: float | None = None
     original_unit: str | None = None
+    reading_kind: str = "unknown"
     quality: QualitySummary = Field(default_factory=QualitySummary)
 
 
@@ -71,6 +80,12 @@ class ConsumptionSummary(BaseModel):
     point_count: int = 0
     missing_count: int = 0
     unit: str | None = None
+    mixed_units: bool = False
+    invalid_count: int = 0
+    unknown_unit_count: int = 0
+    counter_reset_count: int = 0
+    reading_kind: str = "unknown"
+    complete: bool = True
 
 
 class ConsumptionResponse(BaseModel):
@@ -90,6 +105,10 @@ class HierarchyNode(BaseModel):
     parent_id: str | None = None
     meter_count: int = 0
     consumption_total: float | None = None
+    consumption_unit: str | None = None
+    consumption_share: float | None = None
+    missing_reading_count: int = 0
+    mixed_units: bool = False
     quality: QualitySummary = Field(default_factory=QualitySummary)
     children: list["HierarchyNode"] = Field(default_factory=list)
 
@@ -112,6 +131,11 @@ class SyncRun(BaseModel):
     readings_seen: int = 0
     hierarchy_nodes_seen: int = 0
     error: str | None = None
+    duration_seconds: float | None = None
+    records_rejected: int = 0
+    portal_latency_seconds: float | None = None
+    checkpoint: str | None = None
+    partial: bool = False
 
 
 class Signal(BaseModel):
@@ -120,6 +144,10 @@ class Signal(BaseModel):
     timestamp: datetime | None = None
     detail: str
     severity: str = "info"
+    observed_value: float | None = None
+    baseline: float | None = None
+    rule: str | None = None
+    sufficient_history: bool = True
 
 
 class PageMeta(BaseModel):

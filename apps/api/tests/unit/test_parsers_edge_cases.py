@@ -59,3 +59,10 @@ def test_reading_quality_distinguishes_missing_invalid_and_negative() -> None:
     assert QualityFlag.MISSING in points[1].quality.flags
     assert QualityFlag.INVALID in points[2].quality.flags
     assert points[2].timestamp is None
+
+
+def test_missing_unit_is_not_marked_as_missing_value() -> None:
+    points = parse_consumption({"readings": [{"timestamp": "2026-10-24T00:00:00Z", "value": "3"}]})
+    assert points[0].value == 3
+    assert QualityFlag.UNKNOWN_UNIT in points[0].quality.flags
+    assert QualityFlag.MISSING not in points[0].quality.flags

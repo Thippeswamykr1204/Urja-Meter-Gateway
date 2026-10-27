@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +13,11 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_read_key: str = "local-development-read-key"
     api_admin_key: str = "local-development-admin-key"
+    api_read_keys: str = ""
+    api_admin_keys: str = ""
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    trusted_hosts: str = ""
+    max_request_body_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
     database_url: str = "sqlite:///./flock_energy.db"
     portal_base_url: str = "https://urja-ops.flockenergy.tech"
     portal_username: str = ""
@@ -31,11 +37,18 @@ class Settings(BaseSettings):
     portal_date_format: str = ""
     portal_number_locale: Literal["auto", "en_US", "de_DE", "fr_FR"] = "auto"
     portal_consumption_unit: str = ""
+    portal_reading_kind: Literal["unknown", "interval", "cumulative"] = "unknown"
     portal_timeout_seconds: float = Field(default=10.0, ge=1)
+    portal_connect_timeout_seconds: float = Field(default=5.0, ge=0.1)
+    portal_read_timeout_seconds: float = Field(default=10.0, ge=0.1)
+    portal_write_timeout_seconds: float = Field(default=10.0, ge=0.1)
+    portal_pool_timeout_seconds: float = Field(default=5.0, ge=0.1)
     portal_max_concurrency: int = Field(default=4, ge=1)
     portal_max_retries: int = Field(default=2, ge=0, le=5)
+    portal_reauth_cooldown_seconds: float = Field(default=10.0, ge=0)
     portal_circuit_failure_threshold: int = Field(default=5, ge=1)
     portal_circuit_reset_seconds: int = Field(default=30, ge=1)
+    portal_max_response_bytes: int = Field(default=5_000_000, ge=1024, le=50_000_000)
     rate_limit_per_minute: int = Field(default=120, ge=1)
     rate_limit_max_keys: int = Field(default=10_000, ge=100)
     sync_interval_seconds: int = Field(default=0, ge=0)
@@ -44,6 +57,8 @@ class Settings(BaseSettings):
     hierarchy_ttl_seconds: int = Field(default=900, ge=0)
     recent_consumption_ttl_seconds: int = Field(default=300, ge=0)
     closed_history_ttl_seconds: int = Field(default=0, ge=0)
+    max_date_range_days: int = Field(default=366, ge=1)
+    max_response_records: int = Field(default=10_000, ge=1)
     allow_live_smoke: bool = False
     log_level: str = "INFO"
 
@@ -58,13 +73,44 @@ class Settings(BaseSettings):
     def portal_login_markers(self) -> tuple[str, ...]:
         return tuple(marker.strip() for marker in self.portal_login_page_markers.split(",") if marker.strip())
 
+    @staticmethod
+    def _split_keys(value: str) -> tuple[str, ...]:
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+
+    @property
+    def accepted_read_keys(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self._split_keys(self.api_read_key), *self._split_keys(self.api_read_keys))))
+
+    @property
+    def accepted_admin_keys(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self._split_keys(self.api_admin_key), *self._split_keys(self.api_admin_keys))))
+
+    @property
+    def allowed_origin_values(self) -> tuple[str, ...]:
+        return self._split_keys(self.allowed_origins)
+
+    @property
+    def trusted_host_values(self) -> tuple[str, ...]:
+        return self._split_keys(self.trusted_hosts)
+
     def validate_runtime(self) -> None:
+        portal_url = urlsplit(self.portal_base_url)
+        if portal_url.scheme not in {"http", "https"} or not portal_url.hostname:
+            raise ValueError("PORTAL_BASE_URL must be an absolute http or https URL")
+        if portal_url.username or portal_url.password:
+            raise ValueError("PORTAL_BASE_URL must not contain embedded credentials")
         if self.app_env == "production":
             defaults = {"local-development-read-key", "local-development-admin-key"}
-            if self.api_read_key in defaults or self.api_admin_key in defaults:
+            if any(key in defaults for key in (*self.accepted_read_keys, *self.accepted_admin_keys)):
                 raise ValueError("Production requires non-default API read and admin keys")
-            if self.api_read_key == self.api_admin_key:
+            if set(self.accepted_read_keys) & set(self.accepted_admin_keys):
                 raise ValueError("API read and admin keys must be different")
+            if self.demo_mode:
+                raise ValueError("Production requires DEMO_MODE=false")
+            if portal_url.scheme != "https":
+                raise ValueError("Production requires an HTTPS PORTAL_BASE_URL")
+            if not self.trusted_host_values:
+                raise ValueError("Production requires TRUSTED_HOSTS")
 
 
 @lru_cache(maxsize=1)

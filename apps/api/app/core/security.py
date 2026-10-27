@@ -15,10 +15,8 @@ async def require_api_key(
     x_api_key: str | None = Security(api_key_header),
 ) -> None:
     settings = getattr(request.app.state, "settings", None) or get_settings()
-    if not x_api_key or not any(
-        value and secrets.compare_digest(x_api_key, value)
-        for value in (settings.api_read_key, settings.api_admin_key)
-    ):
+    accepted = (*settings.accepted_read_keys, *settings.accepted_admin_keys)
+    if not x_api_key or not any(secrets.compare_digest(x_api_key, value) for value in accepted):
         raise ApiProblem(401, "api_key_required", "API key required", "Provide a valid read API key.")
 
 
@@ -31,6 +29,16 @@ async def require_admin_key(
 
 async def _require_key(request: Request, provided: str | None, kind: Literal["read", "admin"]) -> None:
     settings = getattr(request.app.state, "settings", None) or get_settings()
-    expected = settings.api_admin_key if kind == "admin" else settings.api_read_key
-    if not expected or not provided or not secrets.compare_digest(provided, expected):
+    accepted = settings.accepted_admin_keys if kind == "admin" else settings.accepted_read_keys
+    if kind == "admin" and provided and any(
+        secrets.compare_digest(provided, expected)
+        for expected in settings.accepted_read_keys
+    ):
+        raise ApiProblem(
+            403,
+            "admin_key_required",
+            "Admin API key required",
+            "A valid read API key cannot access this admin route.",
+        )
+    if not provided or not any(secrets.compare_digest(provided, expected) for expected in accepted):
         raise ApiProblem(401, "api_key_required", "API key required", f"Provide a valid {kind} API key.")

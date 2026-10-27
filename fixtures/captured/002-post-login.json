@@ -1,0 +1,5 @@
+{
+  "data": "[{\"email\":1,\"error\":2},\"<REDACTED_EMAIL_e2fdbbcb02>\",\"Invalid email or password.\"]",
+  "status": 401,
+  "type": "failure"
+}

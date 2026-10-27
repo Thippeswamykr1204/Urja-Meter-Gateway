@@ -138,6 +138,7 @@ def parse_consumption(
     date_format: str = "",
     number_locale: str = "auto",
     target_unit: str | None = None,
+    reading_kind: str = "unknown",
 ) -> list[ConsumptionPoint]:
     rows: list[Mapping[str, Any]] = []
     if isinstance(payload, Mapping):
@@ -166,8 +167,8 @@ def parse_consumption(
         if number_result.flags:
             flags.extend(QualityFlag(value) for value in number_result.flags if value in QualityFlag._value2member_map_)
         if observed_unit is None:
-            flags.append(QualityFlag.MISSING)
-            notes.append("unit is missing")
+            flags.append(QualityFlag.UNKNOWN_UNIT)
+            notes.append("unit is unknown or missing")
         elif observed_unit not in {"Wh", "kWh", "MWh", "W", "kW", "MW"}:
             flags.append(QualityFlag.UNKNOWN_UNIT)
             notes.append("unit is not in the documented unit set")
@@ -199,6 +200,7 @@ def parse_consumption(
                 unit=normalized_unit,
                 original_value=number_result.value,
                 original_unit=observed_unit,
+                reading_kind=reading_kind,
                 quality=_quality(flags, notes),
             )
         )

@@ -64,6 +64,7 @@ class DemoPortalAdapter(PortalAdapter):
                 timestamp=now - timedelta(days=offset),
                 value=round(18 + ((offset * 7) % 11) + (2.5 if offset == 4 else 0), 2),
                 unit="kWh",
+                reading_kind="interval",
             )
             for offset in range(13, -1, -1)
         ]

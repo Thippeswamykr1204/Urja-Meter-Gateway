@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Query, Request, status
 
 from app.adapter.errors import (
     PortalAuthenticationError,
@@ -37,7 +37,7 @@ def map_portal_error(error: Exception) -> ApiProblem:
     if isinstance(error, PortalNotFoundError):
         return ApiProblem(404, "portal_not_found", "Resource not found", "The upstream portal did not find the requested resource.")
     if isinstance(error, PortalConfigurationError):
-        return ApiProblem(503, "portal_unconfigured", "Portal integration unavailable", str(error))
+        return ApiProblem(503, "portal_unconfigured", "Portal integration unavailable", "The portal integration is not configured from verified evidence.")
     if isinstance(error, (PortalAuthenticationError, PortalSessionExpiredError)):
         return ApiProblem(502, "portal_authentication_failed", "Portal authentication failed", "The upstream portal did not establish a valid session.")
     if isinstance(error, PortalSchemaDriftError):
@@ -75,8 +75,8 @@ async def list_meters(
     service: Annotated[CatalogService, Depends(get_service)],
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
-    search: str | None = Query(default=None, min_length=1),
-    status_filter: str | None = Query(default=None, alias="status"),
+    search: str | None = Query(default=None, min_length=1, max_length=200),
+    status_filter: str | None = Query(default=None, alias="status", max_length=50),
     latitude: float | None = Query(default=None, alias="lat", ge=-90, le=90),
     longitude: float | None = Query(default=None, alias="lon", ge=-180, le=180),
     radius_km: float | None = Query(default=None, gt=0, le=500),
@@ -105,7 +105,7 @@ async def list_meters(
 @router.get("/search")
 async def unified_search(
     service: Annotated[CatalogService, Depends(get_service)],
-    q: str = Query(min_length=1),
+    q: str = Query(min_length=1, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
 ) -> ApiEnvelope[list[Meter]]:
@@ -114,7 +114,10 @@ async def unified_search(
 
 
 @router.get("/meters/{meter_id}")
-async def get_meter(meter_id: str, service: Annotated[CatalogService, Depends(get_service)]) -> ApiEnvelope[Meter]:
+async def get_meter(
+    service: Annotated[CatalogService, Depends(get_service)],
+    meter_id: str = Path(max_length=128),
+) -> ApiEnvelope[Meter]:
     try:
         meter, provenance = await service.meter(meter_id)
     except Exception as error:
@@ -126,20 +129,25 @@ async def get_meter(meter_id: str, service: Annotated[CatalogService, Depends(ge
 
 @router.get("/meters/{meter_id}/consumption")
 async def get_consumption(
-    meter_id: str,
+    request: Request,
     service: Annotated[CatalogService, Depends(get_service)],
+    meter_id: str = Path(max_length=128),
     start: date | None = None,
     end: date | None = None,
     granularity: str = Query(default="day", pattern="^(hour|day|month)$"),
 ) -> ApiEnvelope[ConsumptionResponse]:
     if start and end and start > end:
         raise ApiProblem(400, "invalid_date_range", "Invalid date range", "start must be on or before end.")
+    if start and end and (end - start).days > request.app.state.settings.max_date_range_days:
+        raise ApiProblem(413, "date_range_too_large", "Date range too large", "The requested date range exceeds the configured API limit.")
     try:
         data = await service.consumption(meter_id, start, end, granularity)
     except PortalNotFoundError as error:
         raise ApiProblem(404, "meter_not_found", "Meter not found", f"No meter exists with id '{meter_id}'.") from error
     except Exception as error:
         raise map_portal_error(error) from error
+    if len(data.points) > request.app.state.settings.max_response_records:
+        raise ApiProblem(413, "response_too_large", "Response too large", "The requested response exceeds the configured record limit.")
     return ApiEnvelope(data=data, provenance=data.provenance)
 
 
@@ -167,7 +175,28 @@ async def get_signals(service: Annotated[CatalogService, Depends(get_service)]) 
 async def sync_status(request: Request) -> ApiEnvelope[SyncRun | dict[str, str]]:
     latest = await request.app.state.store.latest_sync()
     data: SyncRun | dict[str, str] = latest or {"status": "never_run"}
-    return ApiEnvelope(data=data, provenance=Provenance(source="index", stale=False), meta={"running": bool(latest and latest.status == "running")})
+    metrics = request.app.state.catalog_service.sync.metrics()
+    return ApiEnvelope(data=data, provenance=Provenance(source="index", stale=False), meta={"running": bool(metrics["running"]), **metrics})
+
+
+@router.get("/metrics")
+async def metrics(request: Request) -> ApiEnvelope[dict[str, object]]:
+    adapter_metrics = await request.app.state.adapter.health()
+    latest = await request.app.state.store.latest_sync()
+    return ApiEnvelope(
+        data={
+            "sync": request.app.state.catalog_service.sync.metrics(),
+            "api": request.app.state.request_metrics,
+            "latest_sync": latest.model_dump(mode="json") if latest else None,
+            "portal": {
+                "login_count": adapter_metrics.get("login_count", 0),
+                "retry_count": adapter_metrics.get("retry_count", 0),
+                "breaker_state": adapter_metrics.get("breaker_state", "unknown"),
+                "portal_latency_seconds": adapter_metrics.get("portal_latency_seconds"),
+            },
+        },
+        provenance=Provenance(source="index", stale=False),
+    )
 
 
 @router.post("/refresh", dependencies=[Depends(require_admin_key)], status_code=status.HTTP_200_OK)

@@ -1,0 +1,167 @@
+{
+  "data": [
+    {
+      "dtCode": "DT-001",
+      "installStatus": "Decommissioned",
+      "make": "HPL",
+      "meterId": "J100000",
+      "phaseType": "single",
+      "serialNo": "SE33962"
+    },
+    {
+      "dtCode": "DT-002",
+      "installStatus": "Installed",
+      "make": "L&T",
+      "meterId": "J100001",
+      "phaseType": "single",
+      "serialNo": "GE84132"
+    },
+    {
+      "dtCode": "DT-003",
+      "installStatus": "Installed",
+      "make": "L&T",
+      "meterId": "J100002",
+      "phaseType": "single",
+      "serialNo": "AL28136"
+    },
+    {
+      "dtCode": "DT-004",
+      "installStatus": "Installed",
+      "make": "Genus",
+      "meterId": "J100003",
+      "phaseType": "single",
+      "serialNo": "L&84997"
+    },
+    {
+      "dtCode": "DT-005",
+      "installStatus": "Faulty",
+      "make": "Genus",
+      "meterId": "J100004",
+      "phaseType": "single",
+      "serialNo": "SE65293"
+    },
+    {
+      "dtCode": "DT-006",
+      "installStatus": "Faulty",
+      "make": "Allied",
+      "meterId": "J100005",
+      "phaseType": "three",
+      "serialNo": "HP63682"
+    },
+    {
+      "dtCode": "DT-007",
+      "installStatus": "Decommissioned",
+      "make": "HPL",
+      "meterId": "J100006",
+      "phaseType": "single",
+      "serialNo": "SE35634"
+    },
+    {
+      "dtCode": "DT-008",
+      "installStatus": "Decommissioned",
+      "make": "Genus",
+      "meterId": "J100007",
+      "phaseType": "single",
+      "serialNo": "SE11409"
+    },
+    {
+      "dtCode": "DT-009",
+      "installStatus": "Installed",
+      "make": "Genus",
+      "meterId": "J100008",
+      "phaseType": "single",
+      "serialNo": "SE63900"
+    },
+    {
+      "dtCode": "DT-010",
+      "installStatus": "Decommissioned",
+      "make": "Genus",
+      "meterId": "J100009",
+      "phaseType": "single",
+      "serialNo": "SE79541"
+    },
+    {
+      "dtCode": "DT-011",
+      "installStatus": "Faulty",
+      "make": "Secure",
+      "meterId": "J100010",
+      "phaseType": "single",
+      "serialNo": "GE98722"
+    },
+    {
+      "dtCode": "DT-012",
+      "installStatus": "Decommissioned",
+      "make": "HPL",
+      "meterId": "J100011",
+      "phaseType": "three",
+      "serialNo": "SE48422"
+    },
+    {
+      "dtCode": "DT-013",
+      "installStatus": "Installed",
+      "make": "Allied",
+      "meterId": "J100012",
+      "phaseType": "single",
+      "serialNo": "HP85710"
+    },
+    {
+      "dtCode": "DT-014",
+      "installStatus": "Installed",
+      "make": "Allied",
+      "meterId": "J100013",
+      "phaseType": "three",
+      "serialNo": "GE28127"
+    },
+    {
+      "dtCode": "DT-015",
+      "installStatus": "Faulty",
+      "make": "Genus",
+      "meterId": "J100014",
+      "phaseType": "three",
+      "serialNo": "GE52551"
+    },
+    {
+      "dtCode": "DT-016",
+      "installStatus": "Installed",
+      "make": "HPL",
+      "meterId": "J100015",
+      "phaseType": "three",
+      "serialNo": "L&34861"
+    },
+    {
+      "dtCode": "DT-017",
+      "installStatus": "Installed",
+      "make": "Genus",
+      "meterId": "J100016",
+      "phaseType": "three",
+      "serialNo": "GE61949"
+    },
+    {
+      "dtCode": "DT-018",
+      "installStatus": "Installed",
+      "make": "L&T",
+      "meterId": "J100017",
+      "phaseType": "three",
+      "serialNo": "GE52969"
+    },
+    {
+      "dtCode": "DT-019",
+      "installStatus": "Faulty",
+      "make": "HPL",
+      "meterId": "J100018",
+      "phaseType": "single",
+      "serialNo": "GE50943"
+    },
+    {
+      "dtCode": "DT-020",
+      "installStatus": "Decommissioned",
+      "make": "L&T",
+      "meterId": "J100019",
+      "phaseType": "single",
+      "serialNo": "GE24621"
+    }
+  ],
+  "page": 1,
+  "pageSize": 20,
+  "total": 403
+}

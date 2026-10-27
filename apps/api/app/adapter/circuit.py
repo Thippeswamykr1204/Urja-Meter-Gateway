@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from time import monotonic
 
-from app.adapter.errors import PortalUnavailableError
+from app.adapter.errors import PortalCircuitOpenError
 
 
 @dataclass(slots=True)
@@ -18,7 +18,7 @@ class CircuitBreaker:
             self.opened_at = None
             self.failures = 0
             return
-        raise PortalUnavailableError("Portal circuit breaker is open")
+        raise PortalCircuitOpenError("Portal circuit breaker is open")
 
     def record_success(self) -> None:
         self.failures = 0
@@ -28,3 +28,11 @@ class CircuitBreaker:
         self.failures += 1
         if self.failures >= self.failure_threshold:
             self.opened_at = monotonic()
+
+    @property
+    def state(self) -> str:
+        if self.opened_at is None:
+            return "closed"
+        if monotonic() - self.opened_at >= self.reset_seconds:
+            return "half_open"
+        return "open"

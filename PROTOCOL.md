@@ -1,17 +1,17 @@
 # Urja Meter Ops protocol record
 
-## Evidence boundary
+## Investigation boundary
 
-The assignment supplied the portal URL and credentials, but the redacted browser network evidence block was empty in this workspace. The committed fixtures are sanitized local examples and are not observations from the portal. No portal route, field, cookie, timestamp format, unit, count, or rate limit is presented as observed below unless explicitly labelled.
+I have not yet investigated the live portal exchange. The committed fixtures are sanitized local examples and are not observations from the portal. No portal route, field, cookie, timestamp format, unit, count, or rate limit is presented as observed below unless explicitly labelled.
 
-## Observed from the supplied brief
+## Known from the assignment brief
 
 | Subject | Evidence status | Detail |
 |---|---|---|
-| Base URL | Supplied | `https://urja-ops.flockenergy.tech` |
-| User-facing data | Supplied | Meter information, network placement, and recent consumption exist in the portal |
-| Integration posture | Supplied | The portal must be treated as read-only |
-| Credentials | Supplied | They are available to the operator but are not committed to this repository |
+| Base URL | Known from brief | `https://urja-ops.flockenergy.tech` |
+| User-facing data | Known from brief | Meter information, network placement, and recent consumption exist in the portal |
+| Integration posture | Known from brief | The portal must be treated as read-only |
+| Credentials | Private local input | They are not committed to this repository |
 
 ## Authentication record
 
@@ -47,14 +47,21 @@ HTML table parsing does not depend on `<tbody>` or column position. It maps norm
 - Timestamp strings retain their original value. Invalid or missing timestamps remain `null`.
 - Naive timestamps use the configured `PORTAL_TIMEZONE` and receive `assumed_timezone`; slash dates require `PORTAL_DATE_FORMAT` to avoid a silent day/month guess.
 - Numeric parsing supports explicit `en_US`, `de_DE`, `fr_FR`, or conservative auto handling. Ambiguous separators are flagged rather than guessed.
-- Units are never defaulted. Documented `Wh` to `kWh` and `MWh` to `kWh` conversions receive `unit_converted`; unknown or missing units are flagged.
+- Units are never defaulted. Documented `Wh` to `kWh` and `MWh` to `kWh` conversions receive `unit_converted`; unknown or missing units receive `unknown_unit`, while `missing` remains reserved for absent values.
 - Meter and reading duplicates remain as separate records with `duplicate` flags.
-- Readings can receive `missing`, `invalid`, `out_of_order`, `negative_value`, `unknown_unit`, `ambiguous_number`, and `assumed_timezone` flags.
-- Hierarchy reconstruction preserves duplicate records, marks orphans and cycles, computes meter and consumption rollups, and adds `Unassigned` for meters without an observed node.
+- Readings can receive `missing`, `invalid`, `out_of_order`, `negative_value`, `unknown_unit`, `ambiguous_number`, `assumed_timezone`, `conflict`, and `counter_reset` flags.
+- The configured reading kind is `unknown` unless evidence or configuration says `interval` or `cumulative`. Interval values are summed only when unit-consistent. Cumulative values are converted to non-negative deltas only when configured; counter resets are retained as signals and excluded from totals.
+- Hierarchy reconstruction preserves duplicate records, marks orphans and cycles, computes unit-aware meter and consumption rollups, counts missing readings, flags mixed units, and adds `Unassigned` for meters without an observed node.
 
 ## Request-rate guidance
 
-The portal's actual rate limit is **UNVERIFIED**. The live adapter therefore uses a small configurable concurrency cap, bounded retries with jitter only for transient errors, and a circuit breaker. Keep `PORTAL_MAX_CONCURRENCY` conservative and use the local index for repeated reads. The public API has a bounded, single-process rate limiter; a multi-instance deployment needs a shared limiter.
+The portal's actual rate limit is **UNVERIFIED**. The live adapter therefore uses a small configurable concurrency cap, bounded retries with jitter only for transient errors, honors numeric or HTTP-date `Retry-After`, and uses a circuit breaker. Reauthentication is single-flight and has a cooldown after a session remains expired. Keep `PORTAL_MAX_CONCURRENCY` conservative and use the local index for repeated reads. The public API has a bounded, single-process rate limiter; a multi-instance deployment needs a shared limiter.
+
+## Provenance and storage policy
+
+`fetched_at` is when the adapter or fixture response was obtained. `indexed_at` is when the local snapshot was written. `portal_timestamp` is populated only from an observed upstream timestamp. `age_seconds` is the response-time age of `fetched_at`. A successful empty fetch is `data_status=empty`; a failed refresh leaves the prior snapshot intact and marks it stale. Partial coverage is marked `partial` and is never served as complete.
+
+For a repeated `(meter_id, timestamp)` with a different value or unit, the canonical row is latest-wins. The previous and incoming payloads are both retained in `reading_conflicts`, and the canonical row receives `conflict`. An exact repeat is idempotent and does not create another conflict.
 
 ## Configuration checklist for a live capture
 

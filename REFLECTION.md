@@ -2,20 +2,20 @@
 
 ## What assumptions did you make?
 
-I assumed the missing evidence block was intentional in this workspace rather than permission to guess the portal. The API therefore has a fixture-backed demo mode and an evidence-driven live adapter. I also assumed a small local catalog is useful for the take-home and that SQLite is an appropriate default while clearly marking the scale boundary.
+I assumed the portal should be treated as read-only and that unsupported upstream values must remain unknown rather than being normalized by guesswork. I chose a fixture-backed demo mode so the API and console remain usable without claiming that local examples came from the live system. I also chose SQLite because the brief allows a local index and the take-home is designed to run on one developer machine.
 
 ## Which part was most difficult, and how did you get unstuck?
 
-The hardest part was balancing the requested product surface with the absence of portal protocol evidence. I got unstuck by separating transport from parsing, making live paths configuration-only, and using sanitized fixtures to exercise the rest of the product without making false claims about the upstream system.
+The most difficult part was separating product behavior that can be demonstrated locally from portal behavior that still needs browser capture. I kept transport, parsing, storage, and API contracts separate. That lets the local product demonstrate search, freshness, quality, hierarchy, and failure handling while the live adapter refuses empty or unverified portal configuration.
 
 ## If you had another day, what would you improve?
 
-I would capture the live portal exchange, add exact replay fixtures for authentication and each data view, then tighten the parsers and contract tests against those observations. I would also add a background sync job, persisted consumption records, richer hierarchy validation, and a Postgres migration path for larger catalogs.
+I would capture the login exchange and each read request first, then replace the local examples with sanitized replays of the actual HTML, JSON, headers, expiry response, and pagination behavior. I would use those captures to add endpoint contract checks and parser golden tests. I would also expand the browser suite and measure the SQLite index with larger synthetic datasets before choosing a storage migration boundary.
 
 ## What mistake did you make while solving this?
 
-The first demo implementation accidentally tried to attach provenance to a consumption point even though provenance belongs to the response envelope. I removed that mismatch and kept record-level quality separate from response-level provenance.
+The first demo implementation tried to attach response provenance to an individual consumption point. Provenance belongs to the response envelope, while quality belongs to each record. The model boundary and tests now keep those concepts separate.
 
 ## What would you criticise in your own submission?
 
-The local demo is coherent, but it is not evidence of a working live integration because the required network capture is absent. The HTTP adapter also needs a real portal replay before it can be called production-ready, and the SQLite index currently stores meter metadata rather than a complete historical consumption index.
+The local product is coherent, but it is not proof of a working live integration because the portal exchange has not been captured. The HTTP adapter is deliberately conservative, yet it still needs real replay data before it can be called production-ready. The frontend is more complete than the current browser suite, and the scale boundary is described but not yet measured with the requested benchmark.
